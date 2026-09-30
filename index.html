@@ -1,31 +1,648 @@
+<?php
+require_once __DIR__ . '/security.php';
+require_once __DIR__ . '/content-helper.php';
+require_once __DIR__ . '/events-db.php';
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
+
+$homePage = pageContent('home', 'Dedicated to the service of the voiceless and farmers', 'Dedicated to the service of the voiceless and farmers');
+$projectsError = false;
+try {
+    $projectRecords = getCachedProjects();
+} catch (RuntimeException $error) {
+    error_log('HOME_PROJECTS_LOAD_ERROR: ' . $error->getMessage());
+    $projectRecords = [];
+    $projectsError = true;
+}
+$publicProjects = $projectRecords;
+$eventsError = false;
+try {
+    $publicEvents = fetchPublicEventRecords();
+} catch (RuntimeException $error) {
+    error_log('HOME_EVENTS_LOAD_ERROR: ' . $error->getMessage());
+    $publicEvents = [];
+    $eventsError = true;
+}
+$homeProjects = array_slice($publicProjects, 0, 5);
+$homeEvents = array_slice($publicEvents, 0, 5);
+$contentFile = __DIR__ . '/content-data.json';
+$contentData = is_readable($contentFile) ? json_decode(file_get_contents($contentFile), true) : [];
+$members = $contentData['members'] ?? [];
+$heroConfig = is_array($contentData['homeHero'] ?? null) ? $contentData['homeHero'] : [];
+$heroImages = is_array($heroConfig['images'] ?? null) ? $heroConfig['images'] : ['gallery/animal-care.jpg'];
+$heroImages = array_values(array_filter($heroImages, static function ($image): bool {
+    return is_string($image)
+        && preg_match('#\A(?:gallery/[A-Za-z0-9._/-]+\.(?:jpg|jpeg|png|webp|svg)|uploads/home-hero/hero-[a-f0-9]{32}\.(?:jpg|png|webp))\z#i', $image)
+        && !str_contains($image, '..')
+        && is_file(__DIR__ . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $image));
+}));
+if ($heroImages === []) {
+    $heroImages = ['gallery/animal-care.jpg'];
+}
+$heroGroups = array_chunk($heroImages, 3);
+$heroIntervalSeconds = max(3, min(60, (int) ($heroConfig['intervalSeconds'] ?? 5)));
+$counterFile = __DIR__ . '/visitor-count.txt';
+$visitorCount = 0;
+$counterHandle = fopen($counterFile, 'c+');
+
+if ($counterHandle !== false) {
+    flock($counterHandle, LOCK_EX);
+    $visitorCount = (int) trim(stream_get_contents($counterHandle));
+
+    if (!isset($_COOKIE['site_visitor_counted'])) {
+        $visitorCount++;
+        ftruncate($counterHandle, 0);
+        rewind($counterHandle);
+        fwrite($counterHandle, (string) $visitorCount);
+        setcookie('site_visitor_counted', '1', time() + 86400, '/', '', false, true);
+    }
+
+    flock($counterHandle, LOCK_UN);
+    fclose($counterHandle);
+}
+?>
 <!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Animal Life and Farmer Welfare Trust</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Animal life and farmer welfare trust</title>
+    
+    <!-- HARD SYNCHRONIZED PHP CACHE BYPASS LINK (Fights browser memory lock) -->
+    <link rel="stylesheet" href="style.css?v=<?php echo time(); ?>">
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f4; text-align: center; }
-        header { background-color: #2e7d32; color: white; padding: 20px; }
-        section { padding: 20px; background: white; margin: 20px auto; max-width: 800px; border-radius: 8px; }
-        footer { background-color: #333; color: white; padding: 10px; position: fixed; bottom: 0; width: 100%; }
+        .captcha-refresh { background: none; border: none; color: #3a8f7a; font-size: 18px; cursor: pointer; margin-left: 8px; vertical-align: middle; }
+        .captcha-refresh:hover { color: #0c1418; }
+        .home-listing-section { margin: 0 0 60px; }
+        .home-listing-heading { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin-bottom: 20px; }
+        .home-listing-heading h2 { margin: 0; color: #0c1418; font-size: clamp(26px, 3vw, 34px); }
+        .home-listing-heading p { margin: 7px 0 0; color: #5a6b6e; line-height: 1.6; }
+        .home-listing-count { flex: 0 0 auto; color: #5a6b6e; font-size: 13px; font-weight: 700; }
+        .home-listing-cards { display: grid; gap: 14px; }
+        .home-listing-card { display: flex; align-items: center; gap: 18px; padding: 18px; border: 1px solid #dce8e4; border-radius: 14px; background: #fff; box-shadow: 0 7px 20px rgba(12,20,24,.05); }
+        .home-listing-photo { flex: 0 0 100px; width: 100px; height: 82px; border-radius: 10px; object-fit: cover; background: #f2f6f4; }
+        .home-listing-card-content { flex: 1; min-width: 0; }
+        .home-listing-card h3 { margin: 0 0 6px; color: #0c1418; font-size: 17px; line-height: 1.35; }
+        .home-listing-card p { display: -webkit-box; margin: 0; overflow: hidden; color: #5a6b6e; font-size: 13px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+        .home-listing-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #5a6b6e; font-size: 11px; }
+        .home-listing-meta span { padding: 4px 8px; border-radius: 999px; background: #eef6f3; }
+        .home-listing-link { flex: 0 0 auto; color: #256b5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+        .home-listing-link:hover { text-decoration: underline; }
+        .home-listing-empty { padding: 24px; border: 1px solid #dce8e4; border-radius: 12px; background: #fff; color: #5a6b6e; text-align: center; }
+        .home-listing-more { display: inline-flex; justify-content: center; margin-top: 20px; padding: 11px 18px; border-radius: 8px; background: #0c1418; color: #fff; font-size: 13px; font-weight: 800; text-decoration: none; }
+        .home-listing-more:hover { background: #256b5a; }
+        .home-portal-section { margin: 0 0 60px; padding: 40px 24px; border-radius: 16px; background: linear-gradient(135deg, #f2f6f4, #fff); }
+        .home-portal-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; max-width: 960px; margin: 0 auto; }
+        .home-portal-card { padding: 26px; border: 1px solid #dce8e4; border-radius: 14px; background: #fff; box-shadow: 0 8px 24px rgba(12,20,24,.06); text-align: left; }
+        .home-portal-card h3 { margin: 0 0 8px; color: #0c1418; font-size: 21px; }
+        .home-portal-card p { margin: 0 0 18px; color: #5a6b6e; line-height: 1.65; }
+        .home-portal-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+        .home-portal-actions a { display: inline-flex; justify-content: center; padding: 10px 15px; border: 1px solid #0c1418; border-radius: 8px; background: #0c1418; color: #fff; font-size: 13px; font-weight: 800; text-decoration: none; }
+        .home-portal-actions a.secondary { background: #fff; color: #0c1418; }
+        .home-portal-actions a:hover { background: #256b5a; border-color: #256b5a; color: #fff; }
+        @media (max-width: 650px) { .home-portal-grid { grid-template-columns: 1fr; } .home-portal-section { padding: 30px 18px; } }
+        @media (max-width: 650px) { .home-listing-heading { align-items: flex-start; flex-direction: column; } .home-listing-card { align-items: flex-start; flex-wrap: wrap; } .home-listing-photo { width: 76px; height: 68px; flex-basis: 76px; } .home-listing-link { margin-left: 94px; } }
     </style>
 </head>
 <body>
-    <header>
-        <h1>Animal Life and Farmer Welfare Trust</h1>
-        <p>पशु कल्याण एवं किसान कल्याण हेतु समर्पित ट्रस्ट</p>
-    </header>
-    <section>
-        <h2>हमारे बारे में</h2>
-        <p>हमारा लक्ष्य बेसहारा पशुओं की सेवा करना और किसानों के कल्याण और उत्थान के लिए कार्य करना है।</p>
+
+    <!-- PHP FIXED: Server-side dynamic header component inclusion wrapper -->
+    <?php include 'header.php'; ?>
+
+    <!-- 1. PREMIUM ANIMATED HERO SLIDER CONTAINER WITH LESS TRANSPARENCY & BOTTOM CURVE -->
+    <section class="hero" id="home">
+        <div class="hero-gallery" aria-hidden="true" data-interval-seconds="<?php echo $heroIntervalSeconds; ?>">
+            <?php foreach ($heroGroups as $groupIndex => $groupImages): ?>
+            <div class="hero-gallery-group hero-gallery-count-<?php echo count($groupImages); ?><?php echo $groupIndex === 0 ? ' is-active' : ''; ?>">
+                <?php foreach ($groupImages as $image): ?>
+                <img src="<?php echo htmlspecialchars($image, ENT_QUOTES, 'UTF-8'); ?>" alt="">
+                <?php endforeach; ?>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php if ($homePage['photo']): ?>
+        <div class="hero-photo-overlay" aria-hidden="true" style="background-image:url('<?php echo htmlspecialchars($homePage['photo'], ENT_QUOTES, 'UTF-8'); ?>');"></div>
+        <?php endif; ?>
+        <h1 id="text-hero-title"><?php echo htmlspecialchars($homePage['title'], ENT_QUOTES, 'UTF-8'); ?></h1>
+        <p id="text-hero-desc"><?php echo htmlspecialchars($homePage['description'], ENT_QUOTES, 'UTF-8'); ?></p>
+        <a href="/donation" class="hero-btn" id="text-hero-btn">Donate Now</a>
+        <div class="visitor-badge">👁 Total Visitors: <strong><?php echo number_format($visitorCount); ?></strong></div>
+
+        <!-- Premium SVG Wave Layout Curve Shape -->
+        <div class="hero-curve">
+            <svg viewBox="0 0 1200 120" preserveAspectRatio="none">
+                <path d="M321.39,56.44c58-10.79,114.16-30.13,172-41.86,82.39-16.72,168.19-17.73,250.45-.39C823.78,31,906.67,72,985.66,92.83c70.05,18.48,146.53,26.09,214.34,3V0H0V27.35A600.21,600.21,0,0,0,321.39,56.44Z" class="shape-fill"></path>
+            </svg>
+        </div>
     </section>
-    <section>
-        <h2>संपर्क करें</h2>
-        <p>ईमेल: animallifeandfarmerwelfare945@gmail.com</p>
-    </section>
-    <footer>
-        <p>&copy; Animal Life and Farmer Welfare Trust. All Rights Reserved.</p>
-    </footer>
+
+    <!-- MAIN UNIFIED FLUID LAYOUT WORKSPACE CONTAINER -->
+    <main class="main-container">
+        
+        <!-- 2. ABOUT US NARRATIVE DESCRIPTION BLOCK -->
+        <section id="about" style="margin-bottom: 60px; text-align: center;">
+            <h2 class="section-title" id="text-about-title">About Us</h2>
+            <p id="text-about-desc" style="max-width: 850px; margin: 0 auto; color: #5a6b6e; font-size: 17px; line-height: 1.8;">
+                Animal life and farmer welfare trust is a community-focused non-profit organization working for the protection, treatment and dignity of animals. Alongside animal welfare, the trust supports farmers with practical guidance, awareness and welfare initiatives so that people, animals and rural communities can grow together.
+            </p>
+            <div class="trust-details">
+                <a class="trust-detail-card trust-detail-link" href="/animal-care">
+                    <span class="trust-detail-icon">🐾</span>
+                    <h3>Animal Care</h3>
+                    <p>Medical support, rescue assistance, food and safe shelter for injured, sick and abandoned animals.</p>
+                    <span class="trust-detail-cta">Learn more →</span>
+                </a>
+                <a class="trust-detail-card trust-detail-link" href="/farmer-welfare">
+                    <span class="trust-detail-icon">🌾</span>
+                    <h3>Farmer Welfare</h3>
+                    <p>Awareness, guidance and community support that help farmers build safer and more sustainable livelihoods.</p>
+                    <span class="trust-detail-cta">Learn more →</span>
+                </a>
+                <a class="trust-detail-card trust-detail-link" href="/our-mission">
+                    <span class="trust-detail-icon">🤝</span>
+                    <h3>Our Mission</h3>
+                    <p>To create a compassionate society where every animal is protected and every rural family is respected.</p>
+                    <span class="trust-detail-cta">Learn more →</span>
+                </a>
+            </div>
+            <div class="leadership-block">
+                <div class="leadership-heading">
+                    <span class="detail-kicker">People Behind The Trust</span>
+                    <h3>Our Founders and Members</h3>
+                    <p>Our work grows through the care, ideas and commitment of people who serve animals, farmers and the wider community.</p>
+                </div>
+                <div class="about-team">
+                    <?php foreach ($members as $member): ?>
+                    <?php $memberName = trim((string) ($member['name'] ?? 'Member')); ?>
+                    <?php $memberRole = trim((string) ($member['role'] ?? 'Member')); ?>
+                    <?php $memberBio = trim((string) ($member['bio'] ?? '')); ?>
+                    <?php $memberPhoto = trim((string) ($member['photo'] ?? '')); ?>
+                    <?php $safePhoto = $memberPhoto !== '' ? $memberPhoto : 'logo.png'; ?>
+                    <article class="about-member">
+                        <div class="about-member-photo" style="background-image: url('<?php echo htmlspecialchars($safePhoto, ENT_QUOTES, 'UTF-8'); ?>'); background-repeat: no-repeat; background-size: cover; background-position: center top;" onerror="this.style.backgroundImage='url(\'logo.png\')';"></div>
+                        <div class="about-member-body">
+                            <h3><?php echo htmlspecialchars($memberName, ENT_QUOTES, 'UTF-8'); ?></h3>
+                            <small><?php echo htmlspecialchars($memberRole, ENT_QUOTES, 'UTF-8'); ?></small>
+                            <p><?php echo htmlspecialchars($memberBio, ENT_QUOTES, 'UTF-8'); ?></p>
+                        </div>
+                    </article>
+                    <?php endforeach; ?>
+                </div>
+                <p class="member-photo-note">Member details can be updated from the administrator dashboard after login.</p>
+            </div>
+        </section>
+
+        <section class="home-listing-section" aria-labelledby="home-projects-title">
+            <div class="home-listing-heading">
+                <div>
+                    <h2 id="home-projects-title">Running &amp; Upcoming Projects</h2>
+                    <p>Trust ke chal rahe aur aane wale projects dekhein.</p>
+                </div>
+                <span class="home-listing-count"><?php echo count($publicProjects); ?> project<?php echo count($publicProjects) === 1 ? '' : 's'; ?></span>
+            </div>
+            <?php if ($projectsError): ?>
+                <div class="home-listing-empty" role="status">Projects are temporarily unavailable. Please try again later.</div>
+            <?php elseif ($homeProjects === []): ?>
+                <div class="home-listing-empty">Abhi koi running ya upcoming project available nahi hai.</div>
+            <?php else: ?>
+                <div class="home-listing-cards">
+                    <?php foreach ($homeProjects as $project): ?>
+                        <?php $projectPhoto = trim((string) ($project['leadPhoto'] ?? $project['photo'] ?? '')); ?>
+                        <article class="home-listing-card">
+                            <?php if ($projectPhoto !== ''): ?>
+                                <img class="home-listing-photo" src="<?php echo htmlspecialchars($projectPhoto, ENT_QUOTES, 'UTF-8'); ?>" alt="" loading="lazy">
+                            <?php endif; ?>
+                            <div class="home-listing-card-content">
+                                <h3><?php echo htmlspecialchars((string) ($project['title'] ?? 'Project'), ENT_QUOTES, 'UTF-8'); ?></h3>
+                                <p><?php echo htmlspecialchars((string) ($project['summary'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></p>
+                                <div class="home-listing-meta">
+                                    <span><?php echo htmlspecialchars((string) ($project['status'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></span>
+                                    <?php if (!empty($project['location'])): ?><span><?php echo htmlspecialchars((string) $project['location'], ENT_QUOTES, 'UTF-8'); ?></span><?php endif; ?>
+                                </div>
+                            </div>
+                            <a class="home-listing-link" href="<?php echo htmlspecialchars((string) ($project['link'] ?? '/projects'), ENT_QUOTES, 'UTF-8'); ?>">View details &rarr;</a>
+                        </article>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+            <?php if (count($publicProjects) > 5): ?>
+                <a class="home-listing-more" href="/projects">View more projects</a>
+            <?php endif; ?>
+        </section>
+
+        <section class="home-listing-section" aria-labelledby="home-events-title">
+            <div class="home-listing-heading">
+                <div>
+                    <h2 id="home-events-title">Upcoming Events</h2>
+                    <p>Published public events aur unki details yahan dekhein.</p>
+                </div>
+                <span class="home-listing-count"><?php echo count($publicEvents); ?> event<?php echo count($publicEvents) === 1 ? '' : 's'; ?></span>
+            </div>
+            <?php if ($eventsError): ?>
+                <div class="home-listing-empty" role="status">Events are temporarily unavailable. Please try again later.</div>
+            <?php elseif ($homeEvents === []): ?>
+                <div class="home-listing-empty">Abhi koi upcoming public event available nahi hai.</div>
+            <?php else: ?>
+                <div class="home-listing-cards">
+                    <?php foreach ($homeEvents as $event): ?>
+                        <?php $eventPhotos = is_array($event['photos'] ?? null) ? $event['photos'] : []; ?>
+                        <article class="home-listing-card">
+                            <?php if (!empty($eventPhotos[0])): ?>
+                                <img class="home-listing-photo" src="<?php echo htmlspecialchars((string) $eventPhotos[0], ENT_QUOTES, 'UTF-8'); ?>" alt="" loading="lazy">
+                            <?php endif; ?>
+                            <div class="home-listing-card-content">
+                                <h3><?php echo htmlspecialchars((string) ($event['title'] ?? 'Event'), ENT_QUOTES, 'UTF-8'); ?></h3>
+                                <p><?php echo htmlspecialchars((string) ($event['description'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></p>
+                                <div class="home-listing-meta">
+                                    <?php if (!empty($event['date'])): ?><span><?php echo htmlspecialchars((string) $event['date'], ENT_QUOTES, 'UTF-8'); ?></span><?php endif; ?>
+                                    <?php if (!empty($event['time'])): ?><span><?php echo htmlspecialchars((string) $event['time'], ENT_QUOTES, 'UTF-8'); ?></span><?php endif; ?>
+                                    <?php if (!empty($event['location'])): ?><span><?php echo htmlspecialchars((string) $event['location'], ENT_QUOTES, 'UTF-8'); ?></span><?php endif; ?>
+                                </div>
+                            </div>
+                            <a class="home-listing-link" href="<?php echo htmlspecialchars((string) ($event['link'] ?? '/events'), ENT_QUOTES, 'UTF-8'); ?>">View details &rarr;</a>
+                        </article>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+            <?php if (count($publicEvents) > 5): ?>
+                <a class="home-listing-more" href="/events">View more events</a>
+            <?php endif; ?>
+        </section>
+
+        <section class="home-portal-section" id="volunteer" aria-labelledby="home-portal-title">
+            <h2 class="section-title" id="home-portal-title">Join Our Trust Family</h2>
+            <div class="home-portal-grid">
+                <article class="home-portal-card" id="donor-options">
+                    <h3>Support as a Donor</h3>
+                    <p>Help fund our animal-care and farmer-welfare work, or create a donor account to manage your contributions and receipts.</p>
+                    <div class="home-portal-actions">
+                        <a href="/donation">Donate Now</a>
+                        <a class="secondary" href="/donor-login">Donor Login / Register</a>
+                    </div>
+                </article>
+                <article class="home-portal-card" id="volunteer-options">
+                    <h3>Serve as a Volunteer</h3>
+                    <p>Join our team and take part in trust activities. Register to create your volunteer account or log in to your panel.</p>
+                    <div class="home-portal-actions">
+                        <a href="/volunteer-signup">Register as Volunteer</a>
+                        <a class="secondary" href="/volunteer-login">Volunteer Login</a>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <!-- 3. COMPLIANCE & LEGAL TRANSPARENCY CARDS SECTION -->
+        <section id="compliance" style="margin-bottom: 60px;">
+            <h2 class="section-title" id="text-comp-title">Compliance & Transparency</h2>
+            <p style="text-align: center; color: #5a6b6e; margin-bottom: 30px; font-size: 15px;">Hum transparency me vishwas rakhte hain. Corporate aur individual donors ke liye humare saare registrations poore hain.</p>
+            
+            <div class="grid-layout">
+                <div class="info-card">
+                    <h3>Form 10AC</h3>
+                    <p id="text-c1">Trust registration aur tax exemptions ke liye approved status.</p>
+                </div>
+                <div class="info-card">
+                    <h3>80G Registration</h3>
+                    <p id="text-c2">Donors ko donation par tax me chhoot (exemption) milti hai.</p>
+                </div>
+                <div class="info-card">
+                    <h3>12A Registration</h3>
+                    <p id="text-c3">Trust ki income ko tax-free rakhne ke liye regulatory approval.</p>
+                </div>
+                <div class="info-card">
+                    <h3>CSR-1 Registered</h3>
+                    <p id="text-c4">Companies se Corporate Social Responsibility (CSR) funds lene ke liye eligible.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. CONTACT INFRASTRUCTURE & REGIONAL BANK DETAILS GRID PANEL -->
+        <section id="contact">
+            <h2 class="section-title" id="text-contact-title">Sampark & Donation</h2>
+            <div class="contact-wrapper">
+                <!-- Left Column Details block sheets -->
+                <div class="contact-info">
+                    <h3 id="text-info-heading">Trust Details</h3>
+                    <p><strong>📍 Office Address:</strong> 140, Dariyai Khera, Unnao, Uttar Pradesh</p>
+                    <p><strong>📞 Phone Number:</strong> <a href="tel:+919454750743">+91 9454750743</a></p>
+                    <p><strong>✉ Email Address:</strong> animalLifeandFarmerwelfare@gmail.com</p>
+                    <br>
+                    <h3 id="text-bank-heading">Bank Account Details</h3>
+                    <p><strong>Bank Account Name:</strong> Animal life and farmer welfare trust</p>
+                    <p><strong>Bank:</strong> UCO Bank</p>
+                    <p><strong>Account No:</strong> 22640110147214</p>
+                    <p><strong>IFSC Code:</strong> UCBA002264</p>
+                </div>
+
+                <!-- Right Column Interactive Feed Form Area -->
+                <div class="contact-form">
+                    <h3 id="text-form-heading">Connect With Us</h3>
+                    <form id="contact-message-form">
+                        <div style="position:absolute;left:-9999px;opacity:0;pointer-events:none;" aria-hidden="true">
+                            <label>Website<input type="text" name="website" value="" autocomplete="off" tabindex="-1"></label>
+                        </div>
+                        <div class="form-field">
+                            <label for="form-name">Your Name</label>
+                            <input type="text" id="form-name" placeholder="Enter your name" required>
+                        </div>
+                        <div class="form-field">
+                            <label for="form-email">Email</label>
+                            <input type="email" id="form-email" placeholder="Enter your email" required>
+                        </div>
+                        <div class="form-field">
+                            <label for="form-mobile">Mobile Number</label>
+                            <input type="tel" id="form-mobile" inputmode="tel" placeholder="Enter your mobile number" required>
+                        </div>
+                        <div class="form-field">
+                            <label for="form-subject">Subject</label>
+                            <input type="text" id="form-subject" maxlength="255" placeholder="What would you like to discuss?">
+                        </div>
+                        <div class="form-field">
+                            <label for="form-msg">Message</label>
+                            <div class="message-input-wrap">
+                                <textarea id="form-msg" rows="4" placeholder="Write your message" required></textarea>
+                                <button type="button" class="voice-input-button" id="voice-input-button" aria-label="Dictate message" title="Dictate message">
+                                    <span aria-hidden="true">🎙</span> <span class="voice-input-label">Use microphone</span>
+                                </button>
+                            </div>
+                            <p id="voice-input-status" class="voice-input-status" role="status" aria-live="polite"></p>
+                        </div>
+                        <div class="captcha-row">
+                            <label for="form-captcha">Captcha: <strong id="captcha-question"></strong><button type="button" class="captcha-refresh" id="captchaRefresh" title="Refresh captcha">&#x21bb;</button></label>
+                            <input type="text" id="form-captcha" inputmode="numeric" autocomplete="off" placeholder="Code likhein" required>
+                        </div>
+                        <p id="contact-form-status" class="contact-form-status" role="status" aria-live="polite"></p>
+                        <button type="submit" id="text-form-btn">Send Message</button>
+                    </form>
+                </div>
+
+            </div>
+        </section>
+
+    </main>
+
+    <?php include 'footer.php'; ?>
+
+    <!-- ==========================================================================
+       DYNAMICS ROUTING LOGIC ENGINE & PORTAL DROP-DOWN TOGGLE BINDERS
+       ========================================================================== -->
+    <script>
+        const CONTACT_CSRF_TOKEN = <?php echo json_encode(generateCsrfToken()); ?>;
+        // Bind interactive portal elements as soon as browser DOM loading cycle finishes
+        document.addEventListener("DOMContentLoaded", function() {
+            // Highlight current homepage layout tab as active state menu item
+            if(document.querySelector('.nav-home')) {
+                document.querySelector('.nav-home').classList.add('active');
+            }
+
+            // Interactive Portal login toggle events intercept trigger parameters
+            const portalBtn = document.getElementById('portal-btn-trigger');
+            const dropdownMenu = document.getElementById('portalDropdownMenu');
+
+            if (portalBtn && dropdownMenu) {
+                portalBtn.addEventListener('click', function(event) {
+                    event.stopPropagation();
+                    dropdownMenu.classList.toggle('show-portal');
+                });
+            }
+            
+            // Sync values with cloud dataset sheets if URL configurations are populated
+            if(GLOBAL_SHEETS_API_URL !== "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE") {
+                syncGlobalSiteContent();
+            }
+
+            const messageForm = document.getElementById('contact-message-form');
+            const captchaQuestion = document.getElementById('captcha-question');
+            const captchaInput = document.getElementById('form-captcha');
+            const formStatus = document.getElementById('contact-form-status');
+            let captchaAnswer = 0;
+
+            function createCaptcha() {
+                const firstNumber = Math.floor(Math.random() * 8) + 2;
+                const secondNumber = Math.floor(Math.random() * 8) + 1;
+                captchaAnswer = firstNumber + secondNumber;
+                captchaQuestion.textContent = `${firstNumber} + ${secondNumber} = ?`;
+                captchaInput.value = '';
+            }
+
+            const captchaRefresh = document.getElementById('captchaRefresh');
+            if (captchaRefresh) {
+                captchaRefresh.addEventListener('click', createCaptcha);
+            }
+
+            if (messageForm) {
+                createCaptcha();
+                messageForm.addEventListener('submit', function(event) {
+                    event.preventDefault();
+                    formStatus.textContent = '';
+
+                    if (Number(captchaInput.value.trim()) !== captchaAnswer) {
+                        formStatus.textContent = 'Captcha galat hai. Dobara try karein.';
+                        formStatus.className = 'contact-form-status error';
+                        createCaptcha();
+                        captchaInput.focus();
+                        return;
+                    }
+
+                    const honeypot = messageForm.querySelector('input[name="website"]');
+                    if (honeypot && honeypot.value.trim() !== '') {
+                        formStatus.textContent = 'Spam detected. Please do not fill hidden fields.';
+                        formStatus.className = 'contact-form-status error';
+                        honeypot.value = '';
+                        return;
+                    }
+
+                    const name = document.getElementById('form-name').value.trim();
+                    const email = document.getElementById('form-email').value.trim();
+                    const mobile = document.getElementById('form-mobile').value.trim();
+                    const subject = document.getElementById('form-subject').value.trim();
+                    const message = document.getElementById('form-msg').value.trim();
+                    const formData = new URLSearchParams({
+                        csrf_token: CONTACT_CSRF_TOKEN,
+                        name: name,
+                        email: email,
+                        mobile: mobile,
+                        subject: subject,
+                        message: message,
+                        website: honeypot ? honeypot.value : ''
+                    });
+                    const submitButton = document.getElementById('text-form-btn');
+                    submitButton.disabled = true;
+                    submitButton.textContent = 'Saving...';
+
+                    fetch('/contact-submit.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData })
+                        .then(function(response) {
+                            return response.json().then(function(result) {
+                                if (!response.ok || !result.ok) {
+                                    throw new Error(result.message || 'Message could not be saved.');
+                                }
+                                return result;
+                            });
+                        })
+                        .then(function(result) {
+                            formStatus.textContent = result.message || 'We received your message.';
+                            formStatus.className = 'contact-form-status success';
+                            messageForm.reset();
+                            createCaptcha();
+                        })
+                        .catch(function() {
+                            formStatus.textContent = 'Message save nahi ho saka. Dobara try karein.';
+                            formStatus.className = 'contact-form-status error';
+                        })
+                        .finally(function() {
+                            submitButton.disabled = false;
+                            submitButton.textContent = 'Send Message';
+                        });
+                });
+            }
+
+            const voiceButton = document.getElementById('voice-input-button');
+            const voiceStatus = document.getElementById('voice-input-status');
+            const messageInput = document.getElementById('form-msg');
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+            if (voiceButton && voiceStatus && messageInput) {
+                if (!SpeechRecognition) {
+                        voiceButton.disabled = true;
+                        voiceStatus.textContent = 'Voice input is not supported in this browser.';
+                } else {
+                        const recognition = new SpeechRecognition();
+                        let messageBeforeListening = '';
+                        let isListening = false;
+
+                        recognition.lang = navigator.language || 'en-IN';
+                        recognition.interimResults = true;
+                        recognition.continuous = false;
+
+                        voiceButton.addEventListener('click', function() {
+                            if (isListening) {
+                                recognition.stop();
+                                return;
+                            }
+
+                            messageBeforeListening = messageInput.value.trim();
+                            voiceStatus.textContent = 'Listening... speak your message.';
+                            try {
+                                recognition.start();
+                            } catch (error) {
+                                voiceStatus.textContent = 'Microphone could not be started. Please try again.';
+                            }
+                        });
+
+                        recognition.onstart = function() {
+                            isListening = true;
+                            voiceButton.classList.add('is-listening');
+                            voiceButton.querySelector('.voice-input-label').textContent = 'Stop listening';
+                        };
+
+                        recognition.onresult = function(event) {
+                            let transcript = '';
+                            for (let index = event.resultIndex; index < event.results.length; index += 1) {
+                                transcript += event.results[index][0].transcript;
+                            }
+                            messageInput.value = messageBeforeListening
+                                ? messageBeforeListening + ' ' + transcript.trim()
+                                : transcript.trim();
+                        };
+
+                        recognition.onerror = function(event) {
+                            const statusMessages = {
+                                'not-allowed': 'Microphone permission was denied.',
+                                'no-speech': 'No speech was detected. Please try again.',
+                                'audio-capture': 'No microphone was found.'
+                            };
+                            voiceStatus.textContent = statusMessages[event.error] || 'Voice input failed. Please try again.';
+                        };
+
+                        recognition.onend = function() {
+                            isListening = false;
+                            voiceButton.classList.remove('is-listening');
+                            voiceButton.querySelector('.voice-input-label').textContent = 'Use microphone';
+                            if (!voiceStatus.textContent || voiceStatus.textContent === 'Listening... speak your message.') {
+                                voiceStatus.textContent = 'Voice input finished.';
+                            }
+                        };
+                }
+            }
+        });
+
+        // Global browser document overlay frame checker to collapse floating dropcards if clicked outside
+        window.addEventListener('click', function() {
+            const dropdownMenu = document.getElementById('portalDropdownMenu');
+            if (dropdownMenu && dropdownMenu.classList.contains('show-portal')) {
+                dropdownMenu.classList.remove('show-portal');
+            }
+        });
+
+        // Dynamic cloud properties variables loading interface logic mapping block
+        function syncGlobalSiteContent() {
+            fetch('content-data.php?cacheBust=' + Date.now())
+                .then(res => {
+                    if (!res.ok) throw new Error('Site settings could not be loaded');
+                    return res.json();
+                })
+                .then(data => {
+                    const settings = data && data.settings ? data.settings : {};
+                    const logoUrl = settings.logoUrl || 'logo.png';
+                    const logoWidth = Math.max(24, Math.min(240, Number(settings.logoWidth) || 52));
+                    const logoHeight = Math.max(24, Math.min(240, Number(settings.logoHeight) || 52));
+                    const rootStyle = document.documentElement.style;
+                    rootStyle.setProperty('--site-logo-width', logoWidth + 'px');
+                    rootStyle.setProperty('--site-logo-height', logoHeight + 'px');
+                    const logo = document.querySelector('.logo-img');
+                    if (logo) logo.src = logoUrl;
+                })
+                .catch(error => console.error("Site Settings Sync Failure:", error));
+        }
+
+        (function initializeHomeHeroSlideshow() {
+            const gallery = document.querySelector('.hero-gallery');
+            if (!gallery) return;
+            const slides = Array.from(gallery.querySelectorAll('.hero-gallery-group'));
+            if (slides.length < 2) return;
+            const intervalSeconds = Math.max(3, Math.min(60, Number(gallery.dataset.intervalSeconds) || 5));
+            let activeIndex = 0;
+            window.setInterval(() => {
+                slides[activeIndex].classList.remove('is-active');
+                activeIndex = (activeIndex + 1) % slides.length;
+                slides[activeIndex].classList.add('is-active');
+            }, intervalSeconds * 1000);
+        })();
+
+        // Google Translate Web Component simple translation initialization hooks 
+        function googleTranslateElementInit() {
+            new google.translate.TranslateElement({
+                pageLanguage: 'en',
+                includedLanguages: 'en,hi',
+                layout: google.translate.TranslateElement.InlineLayout.SIMPLE
+            }, 'google_translate_element');
+        }
+
+        (function(){
+            const track = document.querySelector('.about-team');
+            if (!track) return;
+            let timer = null;
+            const delay = 2200;
+            const getStep = () => {
+                const card = track.querySelector('.about-member');
+                if (!card) return 282;
+                return card.offsetWidth + 22;
+            };
+            const scrollOne = () => {
+                const max = track.scrollWidth - track.clientWidth;
+                let next = track.scrollLeft + getStep();
+                if (next >= max - 1) next = 0;
+                track.scrollTo({ left: next, behavior: 'smooth' });
+            };
+            const start = () => { if (!timer) timer = setInterval(scrollOne, delay); };
+            const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+            track.addEventListener('mouseenter', stop);
+            track.addEventListener('mouseleave', start);
+            track.addEventListener('touchstart', stop, { passive: true });
+            track.addEventListener('touchend', () => setTimeout(start, 1200));
+            start();
+        })();
+    </script>
 </body>
 </html>
